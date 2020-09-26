@@ -156,10 +156,10 @@ def cp_lines_by_label(output_filename="output.csv",
           (n_lines_to_cp, label_to_get, output_filename))
 
     line_cnt = 0
-                # e.g. ,Benign$
+                
+    # e.g. ,Benign$
     
     reg_expr = label_to_get.replace(' ', r'\s')+'$'
-    #reg_expr = reg_expr.replace(' ', r'\s')
  
     # could be needed os.path.join
     # python 3 from pathlib import Path

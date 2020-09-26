@@ -5,7 +5,6 @@ Created on Sun Jun 14 14:50:59 2020
 @author: Rolando Inglés
 
 """
-import numpy as np
 import pandas as pd
 
 import iot_23_utils as iotutils

@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-Created on Sat Jul 18 17:59:37 2020
+Created on Sat Aug 29 13:05:20 2020
 
 @author: Rolando Inglés
 """
-# %% imports
-
+# imports
 # python imports
 import os
 import sys
@@ -27,6 +26,8 @@ from keras.utils import np_utils
 from keras.models import Sequential
 from keras.layers import Dense
 from keras.callbacks import EarlyStopping
+from keras.constraints import max_norm
+from keras.layers import Dropout
 
 # plotting imports
 import matplotlib.pyplot as plt
@@ -34,7 +35,7 @@ import matplotlib.pyplot as plt
 # IoT-23 specific imports
 import iot_23_data_set_wrangling as iot_wrangling
 
-# %% constants
+# constants
 RETURN_OK = 0
 RETURN_NOT_OK = -1
 RETURN_USAGE = -2
@@ -42,21 +43,32 @@ RETURN_USAGE = -2
 exec_params = {'data-set-tag': '0K', 
                'split-ratio': 0,
                'kind-of-columns': '',
-               'num-hl-nodes': ''}
+               'num-nodes-tag': '',
+               'num-hidden-layers': 0, 
+               'max-normal-value': -1,
+               'dropout-rate': -1}
 
 def print_usage(argv):
-    print('{} <-t|--data-set-tag=> <-r|--split-ratio=> <-c|--kind-of-columns=> <-n|--num-hl-nodes=>'.format(argv[0]))
-    print('where:')
-    print('-t <5K|10K|25K|50K|100K>')
-    print('-r <15|20|25>')
-    print('-c <both|categorical|scalar>')
-    print('-n <input|output|twice_input|twice_output|two_thirds_inputs_plus_outputs|less_than_twice_input>')
-
+    print('{} <params>'.format(argv[0]))
+    print('allowed params are:')
+    print('\t<-t|--data-set-tag>=<5K|10K|25K|50K|100K>')
+    print('\t<-r|--split-ratio>=<15|20|25>')
+    print('\t<-c|--kind-of-columns>=<both|categorical|scalar>')
+    print('\t<-n|--num-nodes-tag>=<input|output|twice_input|twice_output|two_thirds_inputs_plus_outputs|less_than_twice_input>')
+    print('\t[-l|--num-hidden-layers=n]')
+    print('\t[-m|--max-normal-value=n] <-- it will be used as kernel_constraint parameter')
+    print('\t[-d|--dropout-rate=n] <-- n=0..1')
     
 def parsing_argv(argv):
     try:
-        opts, args = getopt.getopt(argv[1:], 'ht:r:c:n:', 
-                                   ['data-set-tag=','split-ratio=', 'kind-of-columns=', 'num-hl-nodes='])
+        opts, args = getopt.getopt(argv[1:], 'ht:r:c:n:l:m:d:', 
+                                   ['data-set-tag=',
+                                    'split-ratio=', 
+                                    'kind-of-columns=',
+                                    'num-nodes-tag=',
+                                    'num-hidden-layers=',
+                                    'max-normal-value=',
+                                    'dropout-rate='])
     except getopt.GetoptError:
         print_usage(argv)
         return RETURN_NOT_OK
@@ -73,16 +85,37 @@ def parsing_argv(argv):
         elif opt in ('-c', '--kind-of-columns'):
             if arg in ('scalar', 'categorical', 'both'):
                 exec_params['kind-of-columns'] = arg.strip()
-        elif opt in ('-n', '--num-hl-nodes'):
+        elif opt in ('-n', '--num-nodes-tag'):
             if arg in ('input', 'output',
                        'twice_input', 'twice_output',
-                       'two_thirds_inputs_plus_outputs', 'less_than_twice_input'):
-                exec_params['num-hl-nodes'] = arg.strip()
-
+                       'two_thirds_inputs_plus_outputs', 
+                       'less_than_twice_input'):
+                exec_params['num-nodes-tag'] = arg.strip()
+        elif opt in ('-l', '--num-hidden-layers'):
+            if arg.isnumeric():
+                exec_params['num-hidden-layers'] = int(arg)
+            else:
+                exec_params['num-hidden-layers'] = -1
+        elif opt in ('-m', '--max-normal-value'):
+            using_max_normal_value = True
+            if arg.isnumeric():
+                exec_params['max-normal-value'] = float(arg)
+            else:
+                exec_params['max-normal-value'] = -1
+        elif opt in ('-d', '--dropout-rate'):
+            using_dropout_rate = True
+            try:
+                exec_params['dropout-rate'] = float(arg)
+            except ValueError:
+                exec_params['dropout-rate'] = -1  
+                
     if ('0K' == exec_params['data-set-tag'] 
     or 0 == exec_params['split-ratio']
     or '' == exec_params['kind-of-columns']
-    or '' == exec_params['num-hl-nodes']):
+    or '' == exec_params['num-nodes-tag']
+    or -1 == exec_params['num-hidden-layers']
+    or (using_max_normal_value and exec_params['max-normal-value'] == -1)
+    or (using_dropout_rate and exec_params['dropout-rate'] == -1)):
         print_usage(argv)
         return RETURN_NOT_OK
     else:
@@ -150,7 +183,7 @@ def make_up_X(X_raw=None, kind_of_columns=""):
     
     selected_data_set_npa = []
 
-    # %% selecting features to be use as input (scalars, categorical, or both)
+    # selecting features to be use as input (scalars, categorical, or both)
     if 'categorical' == kind_of_columns:
         selected_data_set_df = pd.concat([id_resp_p_df, proto_df, service_df, conn_state_df, history_df], axis=1, sort=False)
         selected_data_set_npa = selected_data_set_df.to_numpy()
@@ -188,7 +221,7 @@ def split_data_set(X=None, y=None, split_ratio=0.00):
                 y_test
 
     """
-    # %% spliting the dataset (holding out the test data subset for validation)
+    # spliting the dataset (holding out the test data subset for validation)
     X_train_valid, X_test, y_train_valid, y_test = train_test_split(X,
                                                                   y,
                                                                   test_size=split_ratio,
@@ -204,16 +237,34 @@ def split_data_set(X=None, y=None, split_ratio=0.00):
     
     return X_train, X_valid, X_test, y_train, y_valid, y_test
 
-
-
-# Build neural network
-def one_hidden_layer(X_train, X_valid, X_test, y_train, y_valid, y_test, n_hl_nodes=0, batch_size=1, epochs=10, verbose=0):
+## Build neural network
+#
+def build_deep_neural_network_model(X_train, X_valid, X_test, y_train, y_valid, y_test, n_hl_nodes=0, batch_size=1, epochs=10, verbose=0):
     n_input_cols = X_train.shape[1]
     
     n_output_cols = y_train.shape[1]
     
     model = Sequential()
+    # the input layer and the default hidden layer
     model.add(Dense(n_hl_nodes, input_shape=(n_input_cols,), activation='relu'))
+    
+    # by default, sequential model includes at least one hidden layer
+    # hence, such layer (-1) is substracted from the total number
+    # gotten from the command-line as parameter
+    hl_to_be_added = exec_params['num-hidden-layers'] - 1
+    for i_hidden_layer in range(hl_to_be_added):
+        layer_to_be_added = Dense(n_hl_nodes, activation='relu')
+        
+        # adding weight constraints to the layer
+        if exec_params['max-normal-value'] >= 0:
+            layer_to_be_added.kernel_constraint = max_norm(exec_params['max-normal-value'])
+        model.add(layer_to_be_added)
+        
+        # adding regularization dropout layer
+        if exec_params['dropout-rate'] >= 0:
+            model.add(Dropout(exec_params['dropout-rate']))
+        
+    # the output layer
     model.add(Dense(n_output_cols, activation='softmax'))
 
     # Compile model
@@ -223,7 +274,6 @@ def one_hidden_layer(X_train, X_valid, X_test, y_train, y_valid, y_test, n_hl_no
     #
     # set early stopping monitor,
     # hence the model will stop training when it does not improve anymore
-    
     early_stopping_monitor = EarlyStopping(monitor="val_loss",
                                            mode="min",
                                            restore_best_weights=True,
@@ -266,11 +316,6 @@ def save_plot(history=None, plot_filename=''):
     plt.savefig('plots/{}.loss.png'.format(plot_filename))
     plt.close()
 
-
-##
-#
-# main processing loop
-#
 def main():
     X_raw, y_raw = load_data_set(exec_params['data-set-tag'])
     
@@ -281,26 +326,27 @@ def main():
     
     n_input_samples = X_train.shape[0]
     
-    if 'input'  == exec_params['num-hl-nodes']:
+    if 'input'  == exec_params['num-nodes-tag']:
         n_hl_nodes = X_train.shape[1]
-    elif 'output'  == exec_params['num-hl-nodes']:
+    elif 'output'  == exec_params['num-nodes-tag']:
         n_hl_nodes = y_train.shape[1]
-    elif 'twice_input'  == exec_params['num-hl-nodes']:
+    elif 'twice_input'  == exec_params['num-nodes-tag']:
         n_hl_nodes = 2 * X_train.shape[1]
-    elif 'twice_output'  == exec_params['num-hl-nodes']:
+    elif 'twice_output'  == exec_params['num-nodes-tag']:
         n_hl_nodes = 2 * y_train.shape[1]
-    elif 'two_thirds_inputs_plus_outputs'  == exec_params['num-hl-nodes']:
+    elif 'two_thirds_inputs_plus_outputs'  == exec_params['num-nodes-tag']:
         n_hl_nodes = int(2/3 * X_train.shape[1]) + y_train.shape[1]
-    elif 'less_than_twice_input'  == exec_params['num-hl-nodes']:
+    elif 'less_than_twice_input'  == exec_params['num-nodes-tag']:
         n_hl_nodes = int(66/100 * X_train.shape[1])
         
     stats_list = []
 
-    print("Parameters: data-set: {}, k_of_columns: {}, ratio: {:f}, nhln: {}".format(
+    print("Parameters: data-set: {}, k_of_columns: {}, ratio: {:f}, nhln: {}, nhl: {}".format(
           exec_params['data-set-tag'],
           exec_params['kind-of-columns'],
           exec_params['split-ratio'],
-          exec_params['num-hl-nodes']))
+          exec_params['num-nodes-tag'],
+          exec_params['num-hidden-layers']))
     
     # 1, 16, 32, 64, 128, 256, 512, 1024, 2048, n_input_samples
     # 10, 100, 500, 1000, 5000
@@ -309,14 +355,14 @@ def main():
             log_msg = 'ds={}, k_cols={}, s_ratio={}, nhln={}, bs={:d}, e={:d},'.format(exec_params['data-set-tag'],
                                                                                    exec_params['kind-of-columns'],
                                                                                    exec_params['split-ratio'],
-                                                                                   exec_params['num-hl-nodes'],
+                                                                                   exec_params['num-nodes-tag'],
                                                                                    batch_size,
                                                                                    epochs)
             ohl_start_time = time.time()
             ohl_start_ts = datetime.datetime.fromtimestamp(ohl_start_time).isoformat()
             print('{} - START - {}'.format(ohl_start_ts, log_msg))
             
-            loss, accuracy, history = one_hidden_layer(X_train,
+            loss, accuracy, history = build_deep_neural_network_model(X_train,
                                                        X_valid,
                                                        X_test,
                                                        y_train,
@@ -337,7 +383,7 @@ def main():
             plot_filename='ohl_ds_{}_k_cols_{}_s_ratio_{:d}_nhln_{}_bs_{:d}_e_{:d}'.format(exec_params['data-set-tag'],
                                                                                            exec_params['kind-of-columns'],
                                                                                            int(exec_params['split-ratio']*100),
-                                                                                           exec_params['num-hl-nodes'],
+                                                                                           exec_params['num-nodes-tag'],
                                                                                            batch_size,
                                                                                            epochs)
   
@@ -345,17 +391,15 @@ def main():
             # print(ohl_start, ohl_end, batch_size, epochs, loss, accuracy)
 
     stats_df = pd.DataFrame(stats_list, columns=['ohl_start', 'ohl_end', 'elapsed', 'batch_size', 'epochs', 'loss', 'accuracy'])
-    #stats_filename='ohl_ratio_{:d}_features_{}_dataset_{}.csv'
-    #stats_filename=stats_filename.format(int(exec_params['split-ratio']*100), exec_params['kind-of-columns'], exec_params['data-set-tag'])
     stats_filename='ohl_ds_{}_k_cols_{}_s_ratio_{:d}_nhln_{}.csv'.format(exec_params['data-set-tag'],
-                                                                                           exec_params['kind-of-columns'],
-                                                                                           int(exec_params['split-ratio']*100),
-                                                                                           exec_params['num-hl-nodes'])
+                                                                         exec_params['kind-of-columns'],
+                                                                         int(exec_params['split-ratio']*100),
+                                                                         exec_params['num-nodes-tag'])
     stats_df.to_csv('stats/'+stats_filename)
     
     return RETURN_OK
 
-# %% running as script
+# running as script
 if __name__ == "__main__":
     if not os.path.exists('stats'):
         os.makedirs('stats')
